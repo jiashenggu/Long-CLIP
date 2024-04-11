@@ -8,53 +8,77 @@ import torch.utils.data as data
 import os
 import numpy as np
 import random
+import open_clip
 
-data4v_root = 'sharegpt4v/data/'
-json_name = 'share-captioner_coco_lcs_sam_1246k_1107.json'
-image_root = 'sharegpt4v/data/'
+
+data4v_root = "sharegpt4v/data/"
+json_name = "share-captioner_coco_lcs_sam_1246k_1107.json"
+image_root = "sharegpt4v/data/"
+
 
 class share4v_val_dataset(data.Dataset):
-    def __init__(self):
+    def __init__(self, model_name="ViT-bigG-14"):
         self.data4v_root = data4v_root
         self.json_name = json_name
         self.image_root = image_root
         self.total_len = 1000
-        with open(data4v_root + json_name, 'r',encoding='utf8')as fp:
-            self.json_data = json.load(fp)[:self.total_len]
-        _ , self.preprocess = clip.load("ViT-L/14")
+        with open(data4v_root + json_name, "r", encoding="utf8") as fp:
+            self.json_data = json.load(fp)[: self.total_len]
+        if model_name == "ViT-bigG-14":
+            model, _, self.preprocess = open_clip.create_model_and_transforms(
+                "ViT-bigG-14", pretrained="laion2b_s39b_b160k"
+            )
+        elif model_name == "ViT-L/14":
+            model, self.preprocess = clip.load("ViT-L/14")
+        del model
+        torch.cuda.empty_cache()
+
     def __len__(self):
         return self.total_len
 
     def __getitem__(self, index):
-        caption = self.json_data[index]['conversations'][1]['value']
+        caption = self.json_data[index]["conversations"][1]["value"]
         caption = caption.replace("\n", " ")
-        image_name = self.image_root + self.json_data[index]['image']
+        image_name = self.image_root + self.json_data[index]["image"]
         image = Image.open(image_name)
         image_tensor = self.preprocess(image)
         return image_tensor, caption
 
 
 class share4v_train_dataset(data.Dataset):
-    def __init__(self):
+    def __init__(self, model_name="ViT-bigG-14", batch_size=64, num_processes=1):
         self.data4v_root = data4v_root
         self.json_name = json_name
         self.image_root = image_root
         self.total_len = 1000
-        with open(data4v_root + json_name, 'r',encoding='utf8')as fp:
-            self.json_data = json.load(fp)[self.total_len:]
-        _ , self.preprocess = clip.load("ViT-L/14")
+        self.batch_size = batch_size
+        self.num_processes = num_processes
+        with open(data4v_root + json_name, "r", encoding="utf8") as fp:
+            self.json_data = json.load(fp)[self.total_len :]
+        if model_name == "ViT-bigG-14":
+            model, _, self.preprocess = open_clip.create_model_and_transforms(
+                "ViT-bigG-14", pretrained="laion2b_s39b_b160k"
+            )
+        elif model_name == "ViT-L/14":
+            model, self.preprocess = clip.load("ViT-L/14")
+        del model
+        torch.cuda.empty_cache()
 
     def __len__(self):
         return len(self.json_data)
 
     def __getitem__(self, index):
-        caption = self.json_data[index]['conversations'][1]['value']
+        caption = self.json_data[index]["conversations"][1]["value"]
         caption = caption.replace("\n", " ")
-        
 
         caption_short = caption.split(". ")[0]
-        
-        image_name = self.image_root + self.json_data[index]['image']
+
+        image_name = self.image_root + self.json_data[index]["image"]
         image = Image.open(image_name)
         image_tensor = self.preprocess(image)
-        return image_tensor, caption, caption_short
+        return (
+            image_tensor,
+            caption,
+            caption_short,
+            index % (self.batch_size * self.num_processes),
+        )

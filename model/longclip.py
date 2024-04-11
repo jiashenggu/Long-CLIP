@@ -67,7 +67,7 @@ def load(name: str, device: Union[str, torch.device] = "cuda" if torch.cuda.is_a
 
     state_dict = torch.load(model_path, map_location="cpu")
     
-    model = build_model(state_dict or model.state_dict(), load_from_clip = False).to(device)
+    model = build_model(state_dict or model.state_dict(), load_from_clip = False, model_name=name).to(device)
 
     if str(device) == "cpu":
         model.float()
@@ -212,20 +212,23 @@ def load_from_clip(name: str, device: Union[str, torch.device] = "cuda" if torch
         model_path = name
     else:
         raise RuntimeError(f"Model {name} not found; available models = {available_models()}")
-
+    print(model_path)
     with open(model_path, 'rb') as opened_file:
-        try:
-            # loading JIT archive
-            model = torch.jit.load(opened_file, map_location=device if jit else "cpu").eval()
-            state_dict = None
-        except RuntimeError:
-            # loading saved state dict
-            if jit:
-                warnings.warn(f"File {model_path} is not a JIT archive. Loading as a state dict instead")
-                jit = False
+        if name in _MODELS:
+            try:
+                # loading JIT archive
+                model = torch.jit.load(opened_file, map_location=device if jit else "cpu").eval()
+                state_dict = None
+            except RuntimeError:
+                # loading saved state dict
+                if jit:
+                    warnings.warn(f"File {model_path} is not a JIT archive. Loading as a state dict instead")
+                    jit = False
+                state_dict = torch.load(opened_file, map_location="cpu")
+        else:
             state_dict = torch.load(opened_file, map_location="cpu")
 
-    model = build_model(state_dict or model.state_dict(), load_from_clip = True).to(device)
+    model = build_model(state_dict or model.state_dict(), load_from_clip = True, model_name=name).to(device)
         
     positional_embedding_pre = model.positional_embedding.type(model.dtype)
             

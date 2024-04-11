@@ -5,8 +5,9 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
-
-
+import torch.utils.checkpoint as checkpoint_sequential
+from accelerate.logging import get_logger
+logger = get_logger(__name__)
 class Bottleneck(nn.Module):
     expansion = 4
 
@@ -169,15 +170,18 @@ class QuickGELU(nn.Module):
 
 
 class ResidualAttentionBlock(nn.Module):
-    def __init__(self, d_model: int, n_head: int, attn_mask: torch.Tensor = None):
+    def __init__(self, d_model: int, n_head: int, mlp_ratio: float = 4.0, attn_mask: torch.Tensor = None):
         super().__init__()
 
         self.attn = nn.MultiheadAttention(d_model, n_head)
         self.ln_1 = LayerNorm(d_model)
+        mlp_width = int(d_model * mlp_ratio)
         self.mlp = nn.Sequential(OrderedDict([
-            ("c_fc", nn.Linear(d_model, d_model * 4)),
+            # ("c_fc", nn.Linear(d_model, d_model * 4)),
+            ("c_fc", nn.Linear(d_model, mlp_width)),
             ("gelu", QuickGELU()),
-            ("c_proj", nn.Linear(d_model * 4, d_model))
+            # ("c_proj", nn.Linear(d_model * 4, d_model))
+            ("c_proj", nn.Linear(mlp_width, d_model))
         ]))
         self.ln_2 = LayerNorm(d_model)
         self.attn_mask = attn_mask
@@ -193,18 +197,20 @@ class ResidualAttentionBlock(nn.Module):
 
 
 class Transformer(nn.Module):
-    def __init__(self, width: int, layers: int, heads: int, attn_mask: torch.Tensor = None):
-        super().__init__()
+    def __init__(self, width: int, layers: int, heads: int, mlp_ratio: float = 4.0, attn_mask: torch.Tensor = None):
+        super(Transformer, self).__init__()
         self.width = width
         self.layers = layers
-        self.resblocks = nn.Sequential(*[ResidualAttentionBlock(width, heads, attn_mask) for _ in range(layers)])
+        self.resblocks = nn.Sequential(*[ResidualAttentionBlock(width, heads, mlp_ratio, attn_mask) for _ in range(layers)])
 
     def forward(self, x: torch.Tensor):
         return self.resblocks(x)
-
+        # modules = [resblock.module for resblock in self.resblocks]
+        # out = checkpoint_sequential(modules, segments=2, input=x, use_reentrant=False)
+        # return out
 
 class VisionTransformer(nn.Module):
-    def __init__(self, input_resolution: int, patch_size: int, width: int, layers: int, heads: int, output_dim: int):
+    def __init__(self, input_resolution: int, patch_size: int, width: int, layers: int, heads: int, output_dim: int, mlp_ratio: float = 4.0):
         super().__init__()
         self.input_resolution = input_resolution
         self.output_dim = output_dim
@@ -215,7 +221,7 @@ class VisionTransformer(nn.Module):
         self.positional_embedding = nn.Parameter(scale * torch.randn((input_resolution // patch_size) ** 2 + 1, width))
         self.ln_pre = LayerNorm(width)
 
-        self.transformer = Transformer(width, layers, heads)
+        self.transformer = Transformer(width, layers, heads, mlp_ratio=mlp_ratio)
 
         self.ln_post = LayerNorm(width)
         self.proj = nn.Parameter(scale * torch.randn(width, output_dim))
@@ -254,7 +260,8 @@ class CLIP(nn.Module):
                  transformer_width: int,
                  transformer_heads: int,
                  transformer_layers: int, 
-                 load_from_clip: bool
+                 load_from_clip: bool,
+                 mlp_ratio: float = 4.0
                  ):
         super().__init__()
 
@@ -277,7 +284,8 @@ class CLIP(nn.Module):
                 width=vision_width,
                 layers=vision_layers,
                 heads=vision_heads,
-                output_dim=embed_dim
+                output_dim=embed_dim,
+                mlp_ratio=mlp_ratio
             )
 
         self.transformer = Transformer(
@@ -385,22 +393,34 @@ class CLIP(nn.Module):
 
         return x
 
-
-    def forward(self, image, text):
+    def PCA(self, input_tensor, PCA_dim):
+        mean = torch.mean(input_tensor, dim=0)
+        X_centered = input_tensor - mean.unsqueeze(0)
+        X_centered = X_centered.float()
+        cov_matrix = torch.mm(X_centered.T, X_centered)
+        eigenvalues, eigenvectors = torch.linalg.eig(cov_matrix)
+        eigenvalues = eigenvalues.float()
+        eigenvectors = eigenvectors.float()
+        sorted_indices = torch.argsort(eigenvalues, descending=True)
+        eigenvectors = eigenvectors[:, sorted_indices]
+        principal_components = eigenvectors[:, :PCA_dim]
+        X_transformed = torch.mm(X_centered, principal_components)
+        X_reversed = torch.mm(X_transformed, principal_components.T)
+        X_reversed += mean
+        return X_reversed
+    
+    def forward(self, image, text, is_short=False):
         image_features = self.encode_image(image)
         text_features = self.encode_text(text)
 
         # normalized features
-        image_features = image_features / image_features.norm(dim=1, keepdim=True)
-        text_features = text_features / text_features.norm(dim=1, keepdim=True)
+        image_features = image_features / image_features.norm(dim=-1, keepdim=True)
+        text_features = text_features / text_features.norm(dim=-1, keepdim=True)
 
-        # cosine similarity as logits
-        logit_scale = self.logit_scale.exp()
-        logits_per_image = logit_scale * image_features @ text_features.t()
-        logits_per_text = logits_per_image.t()
+        if is_short:
+            image_features = self.PCA(image_features, 32)
 
-        # shape = [global_batch_size, global_batch_size]
-        return logits_per_image, logits_per_text
+        return image_features, text_features, self.logit_scale.exp()
 
 
 def convert_weights(model: nn.Module):
@@ -427,7 +447,7 @@ def convert_weights(model: nn.Module):
     model.apply(_convert_weights_to_fp16)
 
 
-def build_model(state_dict: dict, load_from_clip: bool):
+def build_model(state_dict: dict, load_from_clip: bool, model_name: str = None):
     vit = "visual.proj" in state_dict
 
     if vit:
@@ -451,11 +471,15 @@ def build_model(state_dict: dict, load_from_clip: bool):
     transformer_width = state_dict["ln_final.weight"].shape[0]
     transformer_heads = transformer_width // 64
     transformer_layers = len(set(k.split(".")[2] for k in state_dict if k.startswith("transformer.resblocks")))
-
+    
+    # logger.info(
+    #     f"Embed Dim: {embed_dim}, Image Resolution: {image_resolution}, Vision Layers: {vision_layers}, Vision Width: {vision_width}, Vision Patch Size: {vision_patch_size}, Context Length: {context_length}, Vocab Size: {vocab_size}, Transformer Width: {transformer_width}, Transformer Heads: {transformer_heads}, Transformer Layers: {transformer_layers}, Load from CLIP: {load_from_clip}"
+    # )
     model = CLIP(
         embed_dim,
         image_resolution, vision_layers, vision_width, vision_patch_size,
-        context_length, vocab_size, transformer_width, transformer_heads, transformer_layers, load_from_clip
+        context_length, vocab_size, transformer_width, transformer_heads, transformer_layers, load_from_clip,
+        mlp_ratio=4.9231 if "bigG" in model_name else 4.0
     )
 
     for key in ["input_resolution", "context_length", "vocab_size"]:

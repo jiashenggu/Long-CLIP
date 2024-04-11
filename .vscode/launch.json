@@ -1,0 +1,45 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        
+        {
+            "name": "Python: fsdp",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "accelerate.commands.launch",
+            "args": [
+                "--config_file", "fsdp_config.yaml",
+                "--num_processes=4",
+                "train_accelerate.py",
+                "--train_batch_size", "64",
+            ],
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}/train",
+            "justMyCode": false,
+            "env": {
+                "CUDA_VISIBLE_DEVICES": "0,1,2,3"
+            }
+        },
+        {
+            "name": "Python: ddp",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "torch.distributed.launch",
+            "args": [
+                "--nproc_per_node=1",
+                "--use-env",
+                "train.py",
+                "--base_model", "ViT-L/14"
+            ],
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}/train",
+            "justMyCode": false,
+            "env": {
+                "CUDA_VISIBLE_DEVICES": "3"
+            }
+        }
+    ]
+}
