@@ -22,7 +22,7 @@ import numpy as np
 import datetime
 import warnings
 import math
-from accelerate import Accelerator
+from accelerate import Accelerator, InitProcessGroupKwargs
 from accelerate import FullyShardedDataParallelPlugin
 from accelerate.utils import ProjectConfiguration, set_seed
 
@@ -44,7 +44,6 @@ class CLIP_Clean_Train:
         base_model="ViT-B/16",
         output_dir="longclip",
     ):
-
         self.base_model = base_model
         self.model, _ = longclip.load_from_clip(self.base_model, device="cpu")
         self.model = self.model.float()
@@ -58,32 +57,35 @@ class CLIP_Clean_Train:
         self.ckptdir = Path(output_dir, "ckpt/")
         os.makedirs(self.ckptdir, exist_ok=True)
 
-        self.model.logit_scale = torch.nn.Parameter(torch.ones([]) * log_scale)
-
         self.optimizer = optim.AdamW(
             self.model.parameters(), lr=self.lr, weight_decay=self.weight_decay
         )
 
         trainset = share4v_train_dataset(
-            batch_size=self.batch_size, num_processes=accelerator.num_processes
+            model_name=self.base_model,
+            batch_size=self.batch_size,
+            num_processes=accelerator.num_processes,
         )
         self.train_dataloader = torch.utils.data.DataLoader(
             trainset, batch_size=self.batch_size, num_workers=32, pin_memory=True
         )
+        self.test_batch_size = 1000
+        testset = share4v_val_dataset(
+            model_name=self.base_model,
+            batch_size=self.test_batch_size,
+        )
 
-        self.test_dataloader = None
+        self.test_dataloader = torch.utils.data.DataLoader(
+            testset, batch_size=self.test_batch_size, num_workers=32, pin_memory=True
+        )
         self.num_update_steps_per_epoch = (
             math.ceil(len(self.train_dataloader) / args.gradient_accumulation_steps)
             // accelerator.num_processes
         )
         max_train_steps = self.num_epoch * self.num_update_steps_per_epoch
-        # self.lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        #     self.optimizer,
-        #     T_max=max_train_steps,
-        #     eta_min=0,
-        # )
-        warm_up_iter = 200
-        T_max = max_train_steps  # 周期
+
+        warm_up_iter = 200 * accelerator.num_processes  # warmup_length
+        T_max = max_train_steps * accelerator.num_processes  # 周期
         lr_min = 0  # 最小值
 
         lambda0 = lambda cur_iter: (
@@ -108,13 +110,11 @@ class CLIP_Clean_Train:
             self.model,
             self.optimizer,
             self.train_dataloader,
-            self.test_dataloader,
             self.lr_scheduler,
         ) = accelerator.prepare(
             self.model,
             self.optimizer,
             self.train_dataloader,
-            self.test_dataloader,
             self.lr_scheduler,
         )
         self.scaler = torch.cuda.amp.grad_scaler.GradScaler()
@@ -127,134 +127,124 @@ class CLIP_Clean_Train:
         )
 
     def train(self, resume_iter=0):
-
         start_epoch = 0
         resume_iter = 0
 
         for epoch in range(start_epoch, self.num_epoch):
-
             train_loss_total = 0.0
             train_loss = 0.0
             train_loss_short = 0.0
 
-            global_step = 0
+            self.model.train()
             for images, texts, texts_short, targets in self.train_dataloader:
-
-                if global_step < resume_iter:
+                if self.progress_bar.n < resume_iter:
                     continue
 
-                with accelerator.accumulate(self.model):
-                    self.optimizer.zero_grad()
+                self.optimizer.zero_grad()
 
-                    texts = longclip.tokenize(texts, truncate=True)
+                texts = longclip.tokenize(texts, truncate=True)
 
-                    # loss = self.inference(images, texts)
-                    image_features, text_features, logit_scale = self.model(
-                        images, texts
+                image_features, text_features, logit_scale = self.model(images, texts)
+
+                image_feat_all = accelerator.gather(image_features)
+                text_feat_all = accelerator.gather(text_features)
+
+                sim_i2t = torch.matmul(image_features, text_feat_all.T)
+                sim_t2i = torch.matmul(text_features, image_feat_all.T)
+                sim_i2t = logit_scale * sim_i2t
+                sim_t2i = logit_scale * sim_t2i
+                loss = (
+                    F.cross_entropy(sim_i2t, targets, label_smoothing=0.1)
+                    + F.cross_entropy(sim_t2i, targets, label_smoothing=0.1)
+                ) / 2
+                loss_short = 0.0
+                loss_total = 0.0
+
+                try:
+                    images_short = images.clone()
+                    texts_short = longclip.tokenize(texts_short, truncate=True)
+                    (
+                        image_features_short,
+                        text_features_short,
+                        logit_scale_short,
+                    ) = self.model(images_short, texts_short)
+
+                    image_feat_all_short = accelerator.gather(image_features_short)
+                    text_feat_all_short = accelerator.gather(text_features_short)
+
+                    sim_i2t_short = torch.matmul(
+                        image_features_short, text_feat_all_short.T
                     )
-                    image_feat_all = accelerator.gather(image_features)
-                    text_feat_all = accelerator.gather(text_features)
+                    sim_t2i_short = torch.matmul(
+                        text_features_short, image_feat_all_short.T
+                    )
+                    sim_i2t_short = logit_scale_short * sim_i2t_short
+                    sim_t2i_short = logit_scale_short * sim_t2i_short
 
-                    sim_i2t = torch.matmul(image_features, text_feat_all.T)
-                    sim_t2i = torch.matmul(text_features, image_feat_all.T)
-                    sim_i2t = logit_scale * sim_i2t
-                    sim_t2i = logit_scale * sim_t2i
-                    loss = (
-                        F.cross_entropy(sim_i2t, targets, label_smoothing=0.1)
-                        + F.cross_entropy(sim_t2i, targets, label_smoothing=0.1)
-                    ) / 2
-                    loss_short = 0.0
-                    loss_total = loss
-
-                    try:
-                        images_short = images.clone()
-                        texts_short = longclip.tokenize(texts_short, truncate=True)
-                        image_features_short, text_features_short, logit_scale_short = (
-                            self.model(images_short, texts_short)
-                        )
-                        image_feat_all_short = accelerator.gather(image_features_short)
-                        text_feat_all_short = accelerator.gather(text_features_short)
-                        sim_i2t_short = torch.matmul(
-                            image_features_short, text_feat_all_short.T
-                        )
-                        sim_t2i_short = torch.matmul(
-                            text_features_short, image_feat_all_short.T
-                        )
-                        sim_i2t_short = logit_scale_short * sim_i2t_short
-                        sim_t2i_short = logit_scale_short * sim_t2i_short
-
-                        loss_short = (
-                            0.1
-                            * (
-                                F.cross_entropy(
-                                    sim_i2t_short, targets, label_smoothing=0.1
-                                )
-                                + F.cross_entropy(
-                                    sim_t2i_short, targets, label_smoothing=0.1
-                                )
+                    loss_short = (
+                        0.1
+                        * (
+                            F.cross_entropy(sim_i2t_short, targets, label_smoothing=0.1)
+                            + F.cross_entropy(
+                                sim_t2i_short, targets, label_smoothing=0.1
                             )
-                            / 2
                         )
-                        loss_total += loss_short
-                        accelerator.backward(loss_total)
-                        # accelerator.backward(loss, retain_graph=True)
-                        # accelerator.backward(loss_short, retain_graph=True)
-
-                    except Exception as e:
-                        # SVD may encounter infs, very rare occasion.
-                        print("SVD may encounter infs, very rare occasion.")
-                        logger.error("SVD may encounter infs, very rare occasion.")
-                        print(e)
-                        logger.error(e)
-
-                        accelerator.backward(loss)
-                    avg_loss_total = accelerator.gather(
-                        loss_total.repeat(args.train_batch_size)
-                    ).mean()
-                    train_loss_total += (
-                        avg_loss_total.item() / args.gradient_accumulation_steps
+                        / 2
                     )
+                    loss_total = loss + loss_short
+                    accelerator.backward(loss_total)
 
-                    avg_loss = accelerator.gather(
-                        loss.repeat(args.train_batch_size)
-                    ).mean()
-                    train_loss += avg_loss.item() / args.gradient_accumulation_steps
+                except Exception as e:
+                    logger.error("SVD may encounter infs, very rare occasion.")
+                    logger.error(e)
 
-                    avg_loss_short = accelerator.gather(
-                        loss_short.repeat(args.train_batch_size)
-                    ).mean()
-                    train_loss_short += (
-                        avg_loss_short.item() / args.gradient_accumulation_steps
-                    )
+                    accelerator.backward(loss)
 
-                    self.optimizer.step()
+                avg_loss_total = accelerator.gather(loss_total).mean()
+                train_loss_total += (
+                    avg_loss_total.item() / args.gradient_accumulation_steps
+                )
 
-                if accelerator.sync_gradients:
+                avg_loss = accelerator.gather(loss).mean()
+                train_loss += avg_loss.item() / args.gradient_accumulation_steps
+
+                avg_loss_short = accelerator.gather(loss_short).mean()
+                train_loss_short += (
+                    avg_loss_short.item() / args.gradient_accumulation_steps
+                )
+
+                self.optimizer.step()
+                self.lr_scheduler.step()
+
+                if accelerator.is_main_process:
                     self.progress_bar.update(1)
-                    global_step += 1
-                    train_loss = 0.0
-                    self.lr_scheduler.step()
-                    if global_step % 100 == 0:
-                        if accelerator.is_main_process:
-                            accelerator.log(
-                                {"train_loss_total": train_loss_total}, step=global_step
-                            )
-                            accelerator.log(
-                                {"train_loss": train_loss}, step=global_step
-                            )
-                            accelerator.log(
-                                {"train_loss_short": train_loss_short}, step=global_step
-                            )
-                            accelerator.log(
-                                {"lr": self.lr_scheduler.get_last_lr()[0]},
-                                step=global_step,
-                            )
-                            accelerator.log(
-                                {"logit_scale": self.model.module.logit_scale.item()},
-                                step=global_step,
-                            )
+                    logs = {}
+                    logs.update(train_loss_total=train_loss_total)
+                    logs.update(train_loss=train_loss)
+                    logs.update(train_loss_short=train_loss_short)
+                    logs.update(lr=self.lr_scheduler.get_last_lr()[0])
+                    # logs.update(logit_scale=logit_scale)
+                    unwraped_model = accelerator.unwrap_model(self.model)
 
-                            # self.test()
+                    # After the backward pass, find the maximum gradient norm among all model parameters
+                    max_grad = 0
+                    max_grad_layer = ""
+
+                    for name, parameter in unwraped_model.named_parameters():
+                        if parameter.grad is not None:
+                            grad_norm = parameter.grad.norm().item()
+                            if grad_norm > max_grad:
+                                max_grad = grad_norm
+                                max_grad_layer = name
+
+                    logger.info(f"Layer with max grad: {max_grad_layer} | Max gradient norm: {max_grad}")
+                    logs.update(max_grad=max_grad)
+
+                    logs.update(max_grad=max_grad)
+                    accelerator.log(logs, step=self.progress_bar.n)
+                    train_loss_total = 0.0
+                    train_loss = 0.0
+                    train_loss_short = 0.0
                 logs = {
                     "step_loss": loss.detach().item(),
                     "step_loss_short": loss_short.detach().item(),
@@ -262,55 +252,47 @@ class CLIP_Clean_Train:
                 }
                 self.progress_bar.set_postfix(**logs)
 
-            if accelerator.is_main_process:
-                logger.info(
-                    f"loss, loss_short  after training epoch {epoch}: {loss}, {loss_short}"
-                )
-                print("=====================================")
-                print(
-                    f"loss, loss_short  after training epoch {epoch}: {loss}, {loss_short}"
-                )
-                print("=====================================")
+            logger.info(
+                f"loss, loss_short  after training epoch {epoch}: {loss}, {loss_short}"
+            )
 
-                if self.base_model == "ViT-B/16":
-                    name = "longclip-B.pt"
-                elif self.base_model == "ViT-L/14":
-                    name = "longclip-L.pt"
-                elif (
-                    self.base_model
-                    == "/ML-A100/team/mm/gujiasheng/Long-CLIP/ViT-bigG-14-laion2b_s39b_b160k.pt"
-                ):
-                    name = "longclip-bigG.pt"
-                else:
-                    name = "longclip-others.pt"
-                file_path = Path(self.ckptdir, name + f"_epoch_{epoch}")
-                unwrapped_model = accelerator.unwrap_model(self.model)
-                torch.save(unwrapped_model.state_dict(), file_path)
+            if self.base_model == "ViT-B/16":
+                name = "longclip-B.pt"
+            elif self.base_model == "ViT-L/14":
+                name = "longclip-L.pt"
+            elif (
+                self.base_model
+                == "/ML-A100/team/mm/gujiasheng/Long-CLIP/ViT-bigG-14-laion2b_s39b_b160k.pt"
+            ):
+                name = "longclip-bigG.pt"
+            else:
+                name = "longclip-others.pt"
+            save_path = Path(self.ckptdir, name.replace(".", f"_epoch_{epoch}."))
+            state_dict = accelerator.get_state_dict(self.model)
+            accelerator.save(state_dict, save_path)
+            logger.info(
+                "Model saved to %s",
+                save_path,
+            )
+            self.test()
 
     def test(self):
-        if self.test_dataloader is None:
-            testset = share4v_val_dataset()
-            self.test_dataloader = torch.utils.data.DataLoader(
-                testset, batch_size=32, num_workers=32, pin_memory=True
-            )
+        self.model.eval()
         with torch.no_grad():
-            self.model.eval()
-            for images, texts in tqdm(self.test_dataloader):
+            for images, texts, targets in tqdm(self.test_dataloader):
                 texts = longclip.tokenize(texts, truncate=True)
-                logits_per_image, logits_per_text = self.model(images, texts)
+                image_features, text_features, logit_scale = self.model(images, texts)
 
-                bs = images.shape[0]
-                targets = torch.linspace(0, bs - 1, bs, dtype=int).to(
-                    logits_per_image.device
-                )
-                correct = 0
-                correct += (logits_per_text.argmax(1) == targets).sum().item()
-
-            acc = correct / bs
-            print("=====================================")
-            print(f"test mean of share4v retrieval: {acc}")
-            print("=====================================")
-            self.model.train()
+                sim_i2t = torch.matmul(image_features, text_features.T)
+                sim_i2t = logit_scale * sim_i2t
+                targets = targets.to(sim_i2t.device)
+                correct = (sim_i2t.argmax(1) == targets).sum()
+            acc = correct / self.test_batch_size
+            if accelerator.is_main_process:
+                print("=====================================")
+                print(f"test mean of share4v retrieval: {acc}")
+                print("=====================================")
+        self.model.train()
 
 
 if __name__ == "__main__":
@@ -356,7 +338,7 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
     if args.output_dir == "auto":
-        output_dir = f"lr={args.lr}_wd={args.weight_decay}_wl={args.warmup_length}_log_scale={args.log_scale}_bs={args.train_batch_size}"
+        output_dir = f"lr={args.lr}_wd={args.weight_decay}_wl={args.warmup_length}_log_scale={args.log_scale}_bs={args.train_batch_size}_debug"
     os.makedirs(output_dir, exist_ok=True)
     logging_dir = Path(output_dir, args.logging_dir)
     os.makedirs(logging_dir, exist_ok=True)
@@ -365,10 +347,14 @@ if __name__ == "__main__":
     )
 
     os.environ["FSDP_ACTIVATION_CHECKPOINTING"] = "true"
+    init_handler = InitProcessGroupKwargs()
+    init_handler.timeout = datetime.timedelta(seconds=5400)
+
     accelerator = Accelerator(
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         log_with=args.report_to,
         project_config=accelerator_project_config,
+        kwargs_handlers=[init_handler],
     )
     accelerator.init_trackers(output_dir)
     logging.basicConfig(

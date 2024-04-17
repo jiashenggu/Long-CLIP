@@ -45,7 +45,7 @@ class CLIP_Clean_Train:
         torch.cuda.set_device(device=f"cuda:{local_rank}")
         self.model = self.model.float().cuda()
 
-        self.batch_size = 32
+        self.batch_size = 48
         self.num_epoch = 6
         self.lr = lr
         self.weight_decay = weight_decay
@@ -158,10 +158,9 @@ class CLIP_Clean_Train:
         running_loss_short = 0.0
         rank = torch.distributed.get_rank()
         num_batches_per_epoch = len(dataloader)
-        for i, (images, texts, short_text) in enumerate(
+        for i, (images, texts, short_text, t) in enumerate(
             tqdm(dataloader, disable=(rank != 0))
         ):
-
             step = num_batches_per_epoch * epoch + i
             if step < start_iter:
                 continue
@@ -177,8 +176,9 @@ class CLIP_Clean_Train:
             loss = self.inference(images, texts)
             try:
                 loss_short = 0.1 * self.inference_short(images_short, short_text)
+                loss = loss + loss_short
                 loss.backward()
-                loss_short.backward()
+                # loss_short.backward()
 
             except:
                 # SVD may encounter infs, very rare occasion.
@@ -238,7 +238,6 @@ class CLIP_Clean_Train:
         rank = torch.distributed.get_rank()
 
         for id, (images, text) in enumerate(tqdm(dataloader, disable=(rank != 0))):
-
             images = images.cuda()
             image_features = self.model.module.encode_image(images)
             image_features = image_features / image_features.norm(dim=-1, keepdim=True)
@@ -263,16 +262,15 @@ class CLIP_Clean_Train:
 
         return correct / total
 
-    def test(self, epoch=0):
+    def test(self, epoch):
         rank = torch.distributed.get_rank()
         if rank == 0:
             self.model.eval()
             testset = share4v_val_dataset(model_name=self.base_model)
             testloader = torch.utils.data.DataLoader(
-                testset, batch_size=32, num_workers=32, pin_memory=True
+                testset, batch_size=1000, num_workers=32, pin_memory=True
             )
             with torch.no_grad():
-
                 acc = self.test_epoch(testloader)
                 print("=====================================")
                 print(f"test mean of share4v retrieval: {acc}")
@@ -301,7 +299,6 @@ class CLIP_Clean_Train:
         resume_iter = 0
 
         for epoch in range(start_epoch, self.num_epoch):
-
             loss = self.train_epoch(train_loader, epoch, start_iter=resume_iter)
             print("=====================================")
             print(f"loss after training epoch: {epoch}")
