@@ -45,7 +45,7 @@ class CLIP_Clean_Train:
         torch.cuda.set_device(device=f"cuda:{local_rank}")
         self.model = self.model.float().cuda()
 
-        self.batch_size = 48
+        self.batch_size = 32
         self.num_epoch = 6
         self.lr = lr
         self.weight_decay = weight_decay
@@ -237,7 +237,7 @@ class CLIP_Clean_Train:
         temp_corr_dict = dict()
         rank = torch.distributed.get_rank()
 
-        for id, (images, text) in enumerate(tqdm(dataloader, disable=(rank != 0))):
+        for id, (images, text, t) in enumerate(tqdm(dataloader, disable=(rank != 0))):
             images = images.cuda()
             image_features = self.model.module.encode_image(images)
             image_features = image_features / image_features.norm(dim=-1, keepdim=True)

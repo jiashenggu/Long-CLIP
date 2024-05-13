@@ -392,6 +392,6 @@ if __name__ == "__main__":
         base_model=args.base_model,
         output_dir=output_dir,
     )
-    trainer.train(resume_iter=args.resume_iter)
-    # trainer.test()
+    # trainer.train(resume_iter=args.resume_iter)
+    trainer.test()
     accelerator.end_training()
