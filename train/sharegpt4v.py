@@ -15,8 +15,9 @@ data4v_root = "sharegpt4v/data/"
 json_name = "share-captioner_coco_lcs_sam_1246k_1107.json"
 image_root = "sharegpt4v/data/"
 
+
 class share4v_val_dataset(data.Dataset):
-    def __init__(self, model_name="ViT-bigG-14", batch_size=64, num_processes=1, preprocess=None):
+    def __init__(self, batch_size=64, num_processes=1, preprocess=None):
         self.data4v_root = data4v_root
         self.json_name = json_name
         self.image_root = image_root
@@ -60,7 +61,7 @@ class share4v_val_dataset(data.Dataset):
 
 
 class share4v_train_dataset(data.Dataset):
-    def __init__(self, model_name="ViT-bigG-14", batch_size=64, num_processes=1, preprocess=None):
+    def __init__(self, batch_size=64, num_processes=1, preprocess=None):
         self.data4v_root = data4v_root
         self.json_name = json_name
         self.image_root = image_root

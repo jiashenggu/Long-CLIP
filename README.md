@@ -100,3 +100,22 @@ Please refer to `train/train.md` for training details.
 <p align="center"> <a>  
 <img src="./img/generation.png"  width="900" />
 </a> </p>
+
+bigG:
+test mean of share4v retrieval: 0.527999997138977 [21:]
+test mean of share4v retrieval: 0.6660000085830688 [31:]
+test mean of share4v retrieval: 0.7130000591278076 [41:]
+test mean of share4v retrieval: 0.7660000324249268 [51:]
+test mean of share4v retrieval: 0.7940000295639038 [61:]
+0.87
+
+ViT-L/14:
+test mean of share4v retrieval: 0.6100000143051147 [21:]
+test mean of share4v retrieval: 0.6950000524520874 [31:]
+test mean of share4v retrieval: 0.737000048160553 [41:]
+test mean of share4v retrieval: 0.7800000309944153 [51:]
+test mean of share4v retrieval: 0.796000063419342 [61:]
+0.76
+
+bigg: accuracy 0.56992  diagonal_mean 0.50434
+l:    accuracy 0.5423   diagonal_mean 0.29141 origin l: accuracy 0.5827 diagonal_mean 0.26597

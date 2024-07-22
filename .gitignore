@@ -3,3 +3,4 @@ train/sharegpt4v
 __pycache__
 */lr*
 *.pt
+train/wandb

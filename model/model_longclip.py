@@ -7,9 +7,9 @@ import torch.nn.functional as F
 from torch import nn
 import torch.utils.checkpoint as checkpoint_sequential
 from accelerate.logging import get_logger
+from transformers import T5EncoderModel, AutoTokenizer
 
 logger = get_logger(__name__)
-
 
 class Bottleneck(nn.Module):
     expansion = 4
@@ -359,6 +359,7 @@ class CLIP(nn.Module):
         transformer_layers: int,
         load_from_clip: bool,
         mlp_ratio: float = 4.0,
+        use_t5: bool = False,
     ):
         super().__init__()
 
@@ -397,25 +398,46 @@ class CLIP(nn.Module):
 
         if load_from_clip == False:
             self.positional_embedding = nn.Parameter(
-                torch.empty(248, transformer_width)
+                torch.empty(self.context_length, transformer_width)
             )
             self.positional_embedding_res = nn.Parameter(
-                torch.empty(248, transformer_width)
+                torch.empty(self.context_length, transformer_width)
             )
 
         else:
             self.positional_embedding = nn.Parameter(torch.empty(77, transformer_width))
-
-        self.ln_final = LayerNorm(transformer_width)
-
-        self.text_projection = nn.Parameter(torch.empty(transformer_width, embed_dim))
+        self.t5_hidden_dim = 4096
+        self.use_t5 = use_t5
+        if self.use_t5:
+            self.ln_final = LayerNorm(4096)
+        else:
+            self.ln_final = LayerNorm(transformer_width)
+        if self.use_t5:
+            self.text_projection = nn.Parameter(torch.empty(self.t5_hidden_dim, embed_dim))
+        else:
+            self.text_projection = nn.Parameter(torch.empty(transformer_width, embed_dim))
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
-
+        if self.use_t5:
+            t5_model_kwargs = {
+                "low_cpu_mem_usage": True,
+                "torch_dtype": torch.bfloat16,
+            }
+            path = "/ML-A100/team/mm/gujiasheng/model/PixArt-XL-2-512x512/text_encoder"
+            self.tokenizer = AutoTokenizer.from_pretrained(path)
+            self.t5 = T5EncoderModel.from_pretrained(path, **t5_model_kwargs).eval()
         self.initialize_parameters()
-        self.mask1 = torch.zeros([248, 1])
+        self.mask1 = torch.zeros([self.context_length, 1])
         self.mask1[:20, :] = 1
-        self.mask2 = torch.zeros([248, 1])
+        self.mask2 = torch.zeros([self.context_length, 1])
         self.mask2[20:, :] = 1
+
+    def get_text_embeddings(self, text_tokens_and_mask):
+        with torch.no_grad():
+            text_encoder_embs = self.t5(
+                input_ids=text_tokens_and_mask["input_ids"].to(self.t5.device),
+                attention_mask=text_tokens_and_mask["attention_mask"].to(self.t5.device),
+            )["last_hidden_state"].detach()
+        return text_encoder_embs, text_tokens_and_mask["attention_mask"]
 
     def initialize_parameters(self):
         nn.init.normal_(self.token_embedding.weight, std=0.02)
@@ -451,7 +473,10 @@ class CLIP(nn.Module):
             nn.init.normal_(block.mlp.c_proj.weight, std=proj_std)
 
         if self.text_projection is not None:
-            nn.init.normal_(self.text_projection, std=self.transformer.width**-0.5)
+            if self.use_t5:
+                nn.init.normal_(self.text_projection, std=self.t5_hidden_dim**-0.5)
+            else:
+                nn.init.normal_(self.text_projection, std=self.transformer.width**-0.5)
 
     def build_attention_mask(self):
         # lazily create causal attention mask, with full attention between the vision tokens
@@ -465,121 +490,119 @@ class CLIP(nn.Module):
     def dtype(self):
         return self.visual.conv1.weight.dtype
 
-    def encode_image(self, image):
+    @torch.no_grad()
+    def encode_image(self, image, chunk=32):
+        # out=[]
+        # for i in range(0,image.shape[0],chunk):
+        #     out.append(self.visual(image[i:i+chunk].type(self.dtype)))
+        # return torch.cat(out,0)
         return self.visual(image.type(self.dtype))
 
     def encode_text(self, text):
-        # text[:, 61:] = 49407
-        # for i in range(text.shape[0]):
-        #     t = text[i].clone()
 
-        #     # 设置触发值为 a
-        #     a = 49407
+        if self.use_t5:
+            x, _ = self.get_text_embeddings(text)
+            input_ids, attention_mask = text["input_ids"], text["attention_mask"]
+        else:
+            x = self.token_embedding(text).type(self.dtype)  # [batch_size, n_ctx, d_model]
 
-        #     # 找到第一个等于a的位置
-        #     trigger_index = (t == a).nonzero(as_tuple=True)[-1].item()
+            x = (
+                x
+                + (self.positional_embedding.to(x.device) * self.mask1.to(x.device))
+                .type(self.dtype)
+                .to(x.device)
+                + (self.positional_embedding_res.to(x.device) * self.mask2.to(x.device))
+                .type(self.dtype)
+                .to(x.device)
+            )
 
-        #     # 创建一个掩码，该掩码在触发索引之后为True
-        #     mask = torch.arange(len(t)) > trigger_index
-        #     mask = mask.to(t.device)
-
-        #     # 应用掩码，将a之后的所有0元素设置为-1
-        #     t[mask & (t == 0)] = a
-        #     text[i] = t
-        x = self.token_embedding(text).type(self.dtype)  # [batch_size, n_ctx, d_model]
-
-        x = (
-            x
-            + (self.positional_embedding.to(x.device) * self.mask1.to(x.device))
-            .type(self.dtype)
-            .to(x.device)
-            + (self.positional_embedding_res.to(x.device) * self.mask2.to(x.device))
-            .type(self.dtype)
-            .to(x.device)
-        )
-
-        x = x.permute(1, 0, 2)  # NLD -> LND
-        x = self.transformer(x)
-        x = x.permute(1, 0, 2)  # LND -> NLD
+            x = x.permute(1, 0, 2)  # NLD -> LND
+            x = self.transformer(x)
+            x = x.permute(1, 0, 2)  # LND -> NLD
+            input_ids = text
         x = self.ln_final(x).type(self.dtype)
 
         # x.shape = [batch_size, n_ctx, transformer.width]
         # take features from the eot embedding (eot_token is the highest number in each sequence)
-        x = x[torch.arange(x.shape[0]), text.argmax(dim=-1)] @ self.text_projection
+        x = x[torch.arange(x.shape[0]), input_ids.argmax(dim=-1)] @ self.text_projection
 
         return x
 
     def encode_text_full(self, text):
-        x = self.token_embedding(text).type(self.dtype)  # [batch_size, n_ctx, d_model]
+        if self.use_t5:
+            x, _ = self.get_text_embeddings(text)
+        else:
+            x = self.token_embedding(text).type(self.dtype)  # [batch_size, n_ctx, d_model]
 
-        x = (
-            x
-            + (self.positional_embedding.to(x.device) * self.mask1.to(x.device))
-            .type(self.dtype)
-            .to(x.device)
-            + (self.positional_embedding_res.to(x.device) * self.mask2.to(x.device))
-            .type(self.dtype)
-            .to(x.device)
-        )
+            x = (
+                x
+                + (self.positional_embedding.to(x.device) * self.mask1.to(x.device))
+                .type(self.dtype)
+                .to(x.device)
+                + (self.positional_embedding_res.to(x.device) * self.mask2.to(x.device))
+                .type(self.dtype)
+                .to(x.device)
+            )
 
-        x = x.permute(1, 0, 2)  # NLD -> LND
-        x = self.transformer(x)
-        x = x.permute(1, 0, 2)  # LND -> NLD
+            x = x.permute(1, 0, 2)  # NLD -> LND
+            x = self.transformer(x)
+            x = x.permute(1, 0, 2)  # LND -> NLD
         x = self.ln_final(x).type(self.dtype)
-
-        # x.shape = [batch_size, n_ctx, transformer.width]
-        # take features from the eot embedding (eot_token is the highest number in each sequence)
-        # x = x[torch.arange(x.shape[0]), text.argmax(dim=-1)] @ self.text_projection
 
         return x
 
     def encode_text_inference(
         self,
-        input_tokens,
+        text,
         attention_mask=None,
         intermediate_output=None,
         final_layer_norm_intermediate=True,
     ):
-        x = self.token_embedding(input_tokens).type(
-            self.dtype
-        )  # [batch_size, n_ctx, d_model]
-        x = (
-            x
-            + (self.positional_embedding.to(x.device) * self.mask1.to(x.device))
-            .type(self.dtype)
-            .to(x.device)
-            + (self.positional_embedding_res.to(x.device) * self.mask2.to(x.device))
-            .type(self.dtype)
-            .to(x.device)
-        )
-
-        mask = None
-        if attention_mask is not None:
-            mask = 1.0 - attention_mask.to(x.dtype).reshape(
-                (attention_mask.shape[0], 1, -1, attention_mask.shape[-1])
-            ).expand(
-                attention_mask.shape[0],
-                1,
-                attention_mask.shape[-1],
-                attention_mask.shape[-1],
-            )
-            mask = mask.masked_fill(mask.to(torch.bool), float("-inf"))
-
-        causal_mask = (
-            torch.empty(x.shape[1], x.shape[1], dtype=x.dtype, device=x.device)
-            .fill_(float("-inf"))
-            .triu_(1)
-        )
-        if mask is not None:
-            mask += causal_mask
+        if self.use_t5:
+            x, _ = self.get_text_embeddings(text)
+            input_ids, attention_mask = text["input_ids"], text["attention_mask"]
         else:
-            mask = causal_mask
+            x = self.token_embedding(text).type(
+                self.dtype
+            )  # [batch_size, n_ctx, d_model]
+            x = (
+                x
+                + (self.positional_embedding.to(x.device) * self.mask1.to(x.device))
+                .type(self.dtype)
+                .to(x.device)
+                + (self.positional_embedding_res.to(x.device) * self.mask2.to(x.device))
+                .type(self.dtype)
+                .to(x.device)
+            )
 
-        x = x.permute(1, 0, 2)  # NLD -> LND
-        x, i = self.transformer(
-            x, intermediate_output=intermediate_output, attn_mask=mask
-        )
-        x = x.permute(1, 0, 2)  # LND -> NLD
+            mask = None
+            if attention_mask is not None:
+                mask = 1.0 - attention_mask.to(x.dtype).reshape(
+                    (attention_mask.shape[0], 1, -1, attention_mask.shape[-1])
+                ).expand(
+                    attention_mask.shape[0],
+                    1,
+                    attention_mask.shape[-1],
+                    attention_mask.shape[-1],
+                )
+                mask = mask.masked_fill(mask.to(torch.bool), float("-inf"))
+
+            causal_mask = (
+                torch.empty(x.shape[1], x.shape[1], dtype=x.dtype, device=x.device)
+                .fill_(float("-inf"))
+                .triu_(1)
+            )
+            if mask is not None:
+                mask += causal_mask
+            else:
+                mask = causal_mask
+
+            x = x.permute(1, 0, 2)  # NLD -> LND
+            x, i = self.transformer(
+                x, intermediate_output=intermediate_output, attn_mask=mask
+            )
+            x = x.permute(1, 0, 2)  # LND -> NLD
+            input_ids = text
         x = self.ln_final(x).type(self.dtype)
         if i is not None and final_layer_norm_intermediate:
             i = self.ln_final(i).type(self.dtype)
@@ -588,39 +611,50 @@ class CLIP(nn.Module):
 
         pooled_output = x[
             torch.arange(x.shape[0], device=x.device),
-            input_tokens.to(dtype=torch.int, device=x.device).argmax(dim=-1),
+            text.to(dtype=torch.int, device=x.device).argmax(dim=-1),
         ]
 
         return x, i, pooled_output
 
     def PCA(self, input_tensor, PCA_dim):
+        # 计算均值
         mean = torch.mean(input_tensor, dim=0)
+        # 去均值
         X_centered = input_tensor - mean.unsqueeze(0)
         X_centered = X_centered.float()
-        cov_matrix = torch.mm(X_centered.T, X_centered)
-        eigenvalues, eigenvectors = torch.linalg.eig(cov_matrix)
-        eigenvalues = eigenvalues.float()
-        eigenvectors = eigenvectors.float()
-        sorted_indices = torch.argsort(eigenvalues, descending=True)
-        eigenvectors = eigenvectors[:, sorted_indices]
-        principal_components = eigenvectors[:, :PCA_dim]
+
+        # 使用SVD而不是eig来计算主成分
+        U, S, Vt = torch.linalg.svd(X_centered, full_matrices=False)
+        principal_components = Vt.T[:, :PCA_dim]
+
+        # 转换到新的维度
         X_transformed = torch.mm(X_centered, principal_components)
+        # 恢复到原始空间
         X_reversed = torch.mm(X_transformed, principal_components.T)
         X_reversed += mean
         return X_reversed
 
-    def forward(self, image, text, is_short=False):
-        image_features = self.encode_image(image)
+    def forward(self, image, text, text_short):
         text_features = self.encode_text(text)
-
-        # normalized features
-        image_features = image_features / image_features.norm(dim=-1, keepdim=True)
         text_features = text_features / text_features.norm(dim=-1, keepdim=True)
 
-        if is_short:
-            image_features = self.PCA(image_features, 32)
+        text_features_short = self.encode_text(text_short)
+        text_features_short = text_features_short / text_features_short.norm(
+            dim=-1, keepdim=True
+        )
 
-        return image_features, text_features, self.logit_scale.exp()
+        image_features = self.encode_image(image)
+        image_features = image_features / image_features.norm(dim=-1, keepdim=True)
+
+        image_features_short = self.PCA(image_features, 32)
+
+        return (
+            image_features,
+            text_features,
+            image_features_short,
+            text_features_short,
+            self.logit_scale.exp(),
+        )
 
 
 def convert_weights(model: nn.Module):
@@ -652,7 +686,7 @@ def convert_weights(model: nn.Module):
     model.apply(_convert_weights_to_fp16)
 
 
-def build_model(state_dict: dict, load_from_clip: bool, model_name: str = None):
+def build_model(state_dict: dict, load_from_clip: bool, model_name: str = None, use_t5=False):
     vit = "visual.proj" in state_dict
 
     if vit:
@@ -719,6 +753,7 @@ def build_model(state_dict: dict, load_from_clip: bool, model_name: str = None):
         transformer_layers,
         load_from_clip,
         mlp_ratio=4.9231 if "bigG" in model_name else 4.0,
+        use_t5=use_t5,
     )
 
     for key in ["input_resolution", "context_length", "vocab_size"]:
@@ -726,5 +761,10 @@ def build_model(state_dict: dict, load_from_clip: bool, model_name: str = None):
             del state_dict[key]
 
     convert_weights(model)
-    model.load_state_dict(state_dict)
+    if use_t5:
+        for key in ["text_projection", "ln_final.weight", "ln_final.bias"]:
+            del state_dict[key]
+    missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
+    print(f"Missing keys: {missing_keys}")
+    print(f"Unexpected keys: {unexpected_keys}")
     return model.eval()

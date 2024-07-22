@@ -52,6 +52,7 @@ def load(
     name: str,
     device: Union[str, torch.device] = "cuda" if torch.cuda.is_available() else "cpu",
     download_root: str = None,
+    use_t5=False,
 ):
     """Load a long CLIP model
 
@@ -77,7 +78,7 @@ def load(
     state_dict = torch.load(model_path, map_location="cpu")
 
     model = build_model(
-        state_dict or model.state_dict(), load_from_clip=False, model_name=name
+        state_dict or model.state_dict(), load_from_clip=False, model_name=name, use_t5=use_t5
     ).to(device)
 
     if str(device) == "cpu":
@@ -154,6 +155,7 @@ def load_from_clip(
     device: Union[str, torch.device] = "cuda" if torch.cuda.is_available() else "cpu",
     jit: bool = False,
     download_root: str = None,
+    use_t5=False,
 ):
     """Load from CLIP model for fine-tuning
 
@@ -276,7 +278,7 @@ def load_from_clip(
             state_dict = torch.load(opened_file, map_location="cpu")
 
     model = build_model(
-        state_dict or model.state_dict(), load_from_clip=True, model_name=name
+        state_dict or model.state_dict(), load_from_clip=True, model_name=name, use_t5=use_t5
     ).to(device)
 
     positional_embedding_pre = model.positional_embedding.type(model.dtype)
@@ -330,6 +332,21 @@ def load_from_clip(
         / 4
     )
 
+    # # New length of positional embeddings
+    # new_length = 2 * length
+
+    # positional_embedding_new = torch.zeros([new_length, dim], dtype=model.dtype)
+
+    # # Copy the original embeddings to even indices of the new tensor
+    # positional_embedding_new[::2] = positional_embedding_pre
+
+    # # Linearly interpolate to fill in the odd indices of the new tensor
+    # for i in range(length - 1):
+    #     positional_embedding_new[2*i + 1] = (
+    #         positional_embedding_pre[i] + positional_embedding_pre[i + 1]
+    #     ) / 2
+
+    # positional_embedding_new[-1] = positional_embedding_pre[-1]
     positional_embedding_res = posisitonal_embedding_new.clone()
 
     model.positional_embedding = nn.Parameter(
@@ -437,10 +454,11 @@ def tokenize(
     sot_token = _tokenizer.encoder["<|startoftext|>"]
     eot_token = _tokenizer.encoder["<|endoftext|>"]
     all_tokens = [[sot_token] + _tokenizer.encode(text) + [eot_token] for text in texts]
+    
     if packaging.version.parse(torch.__version__) < packaging.version.parse("1.8.0"):
-        result = torch.zeros(len(all_tokens), context_length, dtype=torch.long)
+        result = torch.ones(len(all_tokens), context_length, dtype=torch.long)*49407
     else:
-        result = torch.zeros(len(all_tokens), context_length, dtype=torch.int)
+        result = torch.ones(len(all_tokens), context_length, dtype=torch.int)*49407
 
     for i, tokens in enumerate(all_tokens):
         if len(tokens) > context_length:
