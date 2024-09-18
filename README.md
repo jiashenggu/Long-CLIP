@@ -11,11 +11,19 @@ This repository is the official implementation of Long-CLIP
 
 
 ## 📜 News
+🚀 [2024/7/3] Our paper has been accepted by ***ECCV2024***.
+
+🚀 [2024/7/3] We release the code of using Long-CLIP in ***SDXL***. For detailed information, you may refer to `SDXL/SDXL.md`.
+
+🚀 [2024/5/21] We update the paper and checkpoints after fixing the bug in DDP and add results in Urban-1k. Special thanks to @MajorDavidZhang for finding and refining this bug in DDP! Now the fine-tuning only takes ***0.5*** hours on *8 GPUs*!
+
+🚀 [2024/5/21] Urban-1k: a scaling-up version of Urban-200 dataset in the paper has been released at this [page](https://huggingface.co/datasets/BeichenZhang/Urban1k).
+
 🚀 [2024/4/1] The training code is released!
 
 🚀 [2024/3/25] The Inference code and models ([LongCLIP-B](https://huggingface.co/BeichenZhang/LongCLIP-B) and [LongCLIP-L](https://huggingface.co/BeichenZhang/LongCLIP-L)) are released!
 
-🚀 [2024/3/25] The [paper](https://arxiv.org/abs/) is released!
+🚀 [2024/3/25] The [paper](https://arxiv.org/abs/2403.15378) is released!
 
 ## 👨‍💻 Todo
 - [x] Training code for Long-CLIP based on OpenAI-CLIP
@@ -58,10 +66,10 @@ with torch.no_grad():
     image_features = model.encode_image(image)
     text_features = model.encode_text(text)
     
-    logits_per_image, logits_per_text = model(image, text)
+    logits_per_image = image_features @ text_features.T
     probs = logits_per_image.softmax(dim=-1).cpu().numpy()
 
-print("Label probs:", probs) # prints: [[0.982  0.01799]]
+print("Label probs:", probs) 
 ```
 
 ### Evaluation
@@ -91,6 +99,11 @@ python flickr30k.py             #Flickr30k
 Please refer to `train/train.md` for training details.
 
 ## ⭐ Demos
+### Long-CLIP-SDXL
+<p align="center"> <a>  
+<img src="./img/demo_SDXL.png"  width="900" />
+</a> </p>
+
 ### Long-caption text-image retrieval 
 <p align="center"> <a>  
 <img src="./img/retrieval.png"  width="900" />
@@ -119,3 +132,14 @@ test mean of share4v retrieval: 0.796000063419342 [61:]
 
 bigg: accuracy 0.56992  diagonal_mean 0.50434
 l:    accuracy 0.5423   diagonal_mean 0.29141 origin l: accuracy 0.5827 diagonal_mean 0.26597
+
+## Citation
+If you find our work helpful for your research, please consider giving a citation:
+```
+@article{zhang2024longclip,
+        title={Long-CLIP: Unlocking the Long-Text Capability of CLIP},
+        author={Beichen Zhang and Pan Zhang and Xiaoyi Dong and Yuhang Zang and Jiaqi Wang},
+        journal={arXiv preprint arXiv:2403.15378},
+        year={2024}
+}
+```

@@ -1,5 +1,7 @@
 import torch
-from utils import concat_all_gather, is_dist_avail_and_initialized, accuracy
+#from utils import concat_all_gather, is_dist_avail_and_initialized, accuracy
+#the original concat_all_gather is abandoned because of no gradient backward
+from utils import is_dist_avail_and_initialized, accuracy
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributed as dist
@@ -53,7 +55,7 @@ class CLIP_Clean_Train:
         if exp_name == "auto":
             self.logdir = f"longclip/lr={lr}_wd={weight_decay}_wl={warmup_length}_logs={log_scale}_64xb"
         else:
-            self.logdir = exp_name
+            self.logdir = args.exp_name
         self.ckptdir = self.logdir + "/ckpt/"
         os.makedirs(self.ckptdir, exist_ok=True)
         self.writer = SummaryWriter(self.logdir)
@@ -164,12 +166,8 @@ class CLIP_Clean_Train:
             step = num_batches_per_epoch * epoch + i
             if step < start_iter:
                 continue
-
-            self.optimizer.zero_grad()
-            self.scheduler(step)
-
-            images = images.cuda()
-            images_short = images.clone()
+            #images = images.cuda()
+            #images_short = images.clone()
             texts = longclip.tokenize(texts, truncate=True).cuda()
             short_text = longclip.tokenize(short_text, truncate=True).cuda()
 
@@ -230,7 +228,7 @@ class CLIP_Clean_Train:
                         self.test(epoch=epoch)
                         self.model.train()
 
-        return running_loss / batch_num
+        # return running_loss / batch_num
 
     @torch.no_grad()
     def test_epoch(self, dataloader):
@@ -348,7 +346,8 @@ def setup_distributed(backend="nccl", port=None):
         world_size=world_size,
         rank=rank,
     )
-    return rank % num_gpus
+    torch.cuda.set_device(device=f'cuda:{rank % num_gpus}')
+    return rank, rank % num_gpus
 
 
 if __name__ == "__main__":
