@@ -13,7 +13,8 @@ import sys
 sys.path.append("..")
 
 # from sharegpt4v import share4v_val_dataset, share4v_train_dataset
-from yivl import share4v_val_dataset, share4v_train_dataset
+# from yivl import share4v_val_dataset, share4v_train_dataset
+from dalle3 import share4v_train_dataset
 from model import longclip
 import argparse
 import os
@@ -55,7 +56,7 @@ class CLIP_Clean_Train:
         num_epoch=6,
         lr=1e-6,
         weight_decay=0.01,
-        log_scale=4.6052,
+        logit_scale=4.6052,
         warmup_length=200,
         base_model="ViT-B/16",
         output_dir="longclip",
@@ -88,17 +89,21 @@ class CLIP_Clean_Train:
 
         trainset = share4v_train_dataset(
             preprocess=_transform,
+            start_idx=4000,
+            end_idx=2000000,
         )
         self.train_dataloader = torch.utils.data.DataLoader(
             trainset,
             batch_size=self.batch_size,
             num_workers=32,
             pin_memory=True,
-            shuffle=True,
+            # shuffle=True,
         )
 
-        testset = share4v_val_dataset(
+        testset = share4v_train_dataset(
             preprocess=_transform,
+            start_idx=0,
+            end_idx=4000,
         )
         self.test_dataloader = torch.utils.data.DataLoader(
             testset, batch_size=self.batch_size, num_workers=32, pin_memory=True
@@ -161,7 +166,7 @@ class CLIP_Clean_Train:
 
         for epoch in range(start_epoch, self.num_epoch):
             self.model.train()
-            for image, text, text_short, img_path_tensor in self.train_dataloader:
+            for image, text, text_short in self.train_dataloader:
                 train_loss_total = 0.0
                 train_loss = 0.0
                 train_loss_short = 0.0
@@ -262,7 +267,7 @@ class CLIP_Clean_Train:
                 num_tokens_text, num_tokens_text_short = num_tokens_text.to(
                     targets.device
                 ), num_tokens_text_short.to(targets.device)
-                weight_num_tokens_text = num_tokens_text.max() / num_tokens_text 
+                weight_num_tokens_text = num_tokens_text.max() / num_tokens_text
                 weight_num_tokens_text_short = (
                     num_tokens_text.max() / num_tokens_text_short
                 )
@@ -302,10 +307,13 @@ class CLIP_Clean_Train:
                 #     )
                 #     / 2
                 # )
-                loss_short = 0.1 * (
-                    F.cross_entropy(sim_t2i_short, targets, reduction="none")
-                    * weight_num_tokens_text_short
-                ).mean()
+                loss_short = (
+                    0.1
+                    * (
+                        F.cross_entropy(sim_t2i_short, targets, reduction="none")
+                        * weight_num_tokens_text_short
+                    ).mean()
+                )
                 loss_total = loss + loss_short
                 accelerator.backward(loss_total)
 
@@ -333,8 +341,8 @@ class CLIP_Clean_Train:
                 self.lr_scheduler.step()
 
                 logs = {
-                    "step_loss": train_loss.detach().item(),
-                    "step_loss_short": train_loss_short.detach().item(),
+                    "step_loss": train_loss,
+                    "step_loss_short": train_loss_short,
                     "lr": self.lr_scheduler.get_last_lr()[0],
                 }
                 self.progress_bar.set_postfix(**logs, refresh=False)
@@ -373,7 +381,7 @@ class CLIP_Clean_Train:
 
             if self.base_model == "ViT-B/16":
                 name = "longclip-B.pt"
-            elif self.base_model == "ViT-L/14":
+            elif "-L" in self.base_model:
                 name = "longclip-L.pt"
             elif (
                 self.base_model
@@ -381,7 +389,7 @@ class CLIP_Clean_Train:
             ):
                 name = "longclip-bigG.pt"
             else:
-                name = "longclip-otacceleratorhers.pt"
+                name = "longclip-other.pt"
             save_path = Path(self.ckptdir, name.replace(".", f"_epoch_{epoch}."))
             state_dict = accelerator.get_state_dict(self.model)
             accelerator.save(state_dict, save_path)
@@ -441,7 +449,7 @@ if __name__ == "__main__":
     parser.add_argument("--lr", default=1e-6, type=float, help="lr.")
     parser.add_argument("--weight_decay", default=1e-2, type=float, help="wd.")
     parser.add_argument(
-        "--log_scale", default=4.6052, type=float, help="clip temperature log scale."
+        "--logit_scale", default=4.6052, type=float, help="clip temperature log scale."
     )
     parser.add_argument("--warmup_length", default=200, type=int, help="warmup_length.")
     parser.add_argument(
@@ -500,7 +508,7 @@ if __name__ == "__main__":
     world_size = int(os.environ["WORLD_SIZE"])
     current_time = datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
     if args.output_dir == "auto":
-        output_dir = f"exp/lr={args.lr}_wd={args.weight_decay}_wl={args.warmup_length}_log_scale={args.log_scale}_bs={args.batch_size}_ngpu={world_size}_{base_model_name}_{current_time}"
+        output_dir = f"exp/lr={args.lr}_wd={args.weight_decay}_wl={args.warmup_length}_logit_scale={args.logit_scale}_bs={args.batch_size}_ngpu={world_size}_{base_model_name}_{current_time}"
     os.makedirs(output_dir, exist_ok=True)
     logging_dir = Path(output_dir, args.logging_dir)
     os.makedirs(logging_dir, exist_ok=True)
@@ -536,7 +544,7 @@ if __name__ == "__main__":
         num_epoch=args.num_epoch,
         lr=args.lr,
         weight_decay=args.weight_decay,
-        log_scale=args.log_scale,
+        logit_scale=args.logit_scale,
         warmup_length=args.warmup_length,
         base_model=args.base_model,
         output_dir=output_dir,

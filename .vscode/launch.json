@@ -13,6 +13,31 @@
             "cwd": "${workspaceFolder}/eval/retrieval",
         },
         {
+            "name": "Python: fsdp longclip-L",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "accelerate.commands.launch",
+            "args": [
+                "--config_file",
+                "fsdp_config.yaml",
+                "--debug",
+                "--num_processes=2",
+                "train_accelerate.py",
+                "--batch_size",
+                "64",
+                "--base_model",
+                "/gpfs/public/vl/gjs/Long-CLIP/checkpoints/longclip-L.pt",
+                "--from_checkpoint"
+            ],
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}/train",
+            "justMyCode": false,
+            "env": {
+                "CUDA_VISIBLE_DEVICES": "0,1",
+                "CUDA_LAUNCH_BLOCKING": "1"
+            }
+        },
+        {
             "name": "Python: fsdp ViT-L/14",
             "type": "debugpy",
             "request": "launch",
@@ -26,13 +51,13 @@
                 "--batch_size",
                 "64",
                 "--base_model",
-                "ViT-L/14",
+                "/gpfs/public/vl/gjs/Long-CLIP/checkpoints/ViT-L-14.pt",
             ],
             "console": "integratedTerminal",
             "cwd": "${workspaceFolder}/train",
             "justMyCode": false,
             "env": {
-                "CUDA_VISIBLE_DEVICES": "2,3",
+                "CUDA_VISIBLE_DEVICES": "0,1",
                 "CUDA_LAUNCH_BLOCKING": "1"
             }
         },

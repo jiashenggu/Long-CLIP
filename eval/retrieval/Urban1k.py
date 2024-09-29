@@ -9,8 +9,8 @@ import torch.utils.data as data
 import os
 import numpy as np
 
-image_root = 'data/Urban1k/image/'
-caption_root = 'data/Urban1k/caption/'
+image_root = '/gpfs/public/vl/gjs/Long-CLIP/eval/data/Urban1k/image/'
+caption_root = '/gpfs/public/vl/gjs/Long-CLIP/eval/data/Urban1k/caption/'
 
 class local_dataset(data.Dataset):
     def __init__(self):
@@ -18,7 +18,7 @@ class local_dataset(data.Dataset):
         self.caption_root = caption_root
         self.total_image = os.listdir(image_root)
         self.total_caption = os.listdir(caption_root)
-        model, preprocess = longclip.load("../../checkpoints/longclip-B.pt", device='cuda')
+        model, preprocess = longclip.load("../../checkpoints/longclip-L.pt", device='cuda')
     def __len__(self):
         return len(self.total_caption)
 
@@ -34,7 +34,7 @@ class local_dataset(data.Dataset):
 if __name__ == '__main__':
     dataset = local_dataset()
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model, preprocess = longclip.load("../../checkpoints/longclip-B.pt", device=device)
+    model, preprocess = longclip.load("/gpfs/public/vl/gjs/Long-CLIP/train/exp/lr=1e-06_wd=0.01_wl=200_logit_scale=4.6052_bs=512_ngpu=8_longclip-L_2024-09-21-00-19-42/ckpt/longclip-L_epoch_16.pt", device=device)
     model.eval()
     print("model done!")
     
@@ -95,3 +95,20 @@ if __name__ == '__main__':
         print(correct)
         print(correct/total)
 
+# model done!
+# text 2 image
+# 1000
+# 860
+# 0.86
+# image to text
+# 1000
+# 824
+# 0.824
+# text 2 image
+# 1000
+# 901
+# 0.901
+# image to text
+# 1000
+# 894
+# 0.894

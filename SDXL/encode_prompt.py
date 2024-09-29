@@ -66,7 +66,7 @@ def kps(model):
 
 bigG_model, _, bigG_preprocess = open_clip.create_model_and_transforms(
     'ViT-bigG-14', 
-    pretrained='Yourpath/open_clip_pytorch_model.bin'
+    pretrained='/gpfs/public/vl/gjs/model/open_clip_pytorch_model.bin'
 )
 bigG_model = kps(bigG_model)
 bigG_model.eval().cuda()
@@ -75,7 +75,7 @@ bigG_encoder = bigG_model.encode_text_full
 openclip_tokenizer = open_clip.get_tokenizer('ViT-bigG-14')
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
-vitl_model, vitl_preprocess = longclip.load("Yourpath/longclip-L.pt", device=device)
+vitl_model, vitl_preprocess = longclip.load("/gpfs/public/vl/gjs/Long-CLIP/checkpoints/longclip-L.pt", device=device)
 vitl_model.eval()
 vitL_encoder = vitl_model.encode_text_full
 
@@ -261,12 +261,12 @@ with torch.no_grad():
                 bs_embed * num_images_per_prompt, -1
             )
 
-        if pipe.text_encoder is not None:
+        if pipe.text_encoder is not None and lora_scale is not None:
             if isinstance(pipe, StableDiffusionXLLoraLoaderMixin) and USE_PEFT_BACKEND:
                 # Retrieve the original scale by scaling back the LoRA layers
                 unscale_lora_layers(pipe.text_encoder, lora_scale)
 
-        if pipe.text_encoder_2 is not None:
+        if pipe.text_encoder_2 is not None and lora_scale is not None:
             if isinstance(pipe, StableDiffusionXLLoraLoaderMixin) and USE_PEFT_BACKEND:
                 # Retrieve the original scale by scaling back the LoRA layers
                 unscale_lora_layers(pipe.text_encoder_2, lora_scale)
